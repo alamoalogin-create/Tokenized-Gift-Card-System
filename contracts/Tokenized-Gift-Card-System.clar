@@ -10,6 +10,13 @@
 (define-constant ERR_ALREADY_REGISTERED (err u106))
 (define-constant ERR_CARD_NOT_FOUND (err u107))
 
+(define-constant ERR_LISTING_NOT_FOUND (err u200))
+(define-constant ERR_INSUFFICIENT_PAYMENT (err u201))
+(define-constant ERR_LISTING_EXPIRED (err u202))
+(define-constant ERR_NOT_LISTING_OWNER (err u203))
+(define-constant ERR_INVALID_PRICE (err u204))
+
+
 (define-data-var token-name (string-ascii 32) "Gift Card Token")
 (define-data-var token-symbol (string-ascii 10) "GIFT")
 (define-data-var token-uri (optional (string-utf8 256)) none)
@@ -210,5 +217,97 @@
             created-block: (get created-block card)
         })
         (err ERR_CARD_NOT_FOUND)
+    )
+)
+
+
+(define-map marketplace-listings uint {
+    seller: principal,
+    card-id: uint,
+    price-stx: uint,
+    expires-block: uint,
+    active: bool
+})
+
+(define-data-var next-listing-id uint u1)
+
+(define-read-only (get-listing (listing-id uint))
+    (map-get? marketplace-listings listing-id)
+)
+
+(define-read-only (is-listing-active (listing-id uint))
+    (match (map-get? marketplace-listings listing-id)
+        listing (and 
+            (get active listing)
+            (<= stacks-block-height (get expires-block listing))
+        )
+        false
+    )
+)
+
+(define-public (list-card-for-sale (card-id uint) (price-stx uint) (duration-blocks uint))
+    (let (
+        (card (unwrap! (map-get? gift-cards card-id) ERR_CARD_NOT_FOUND))
+        (listing-id (var-get next-listing-id))
+        (expires-block (+ stacks-block-height duration-blocks))
+    )
+        (begin
+            (asserts! (is-eq tx-sender (get recipient card)) ERR_NOT_TOKEN_OWNER)
+            (asserts! (> price-stx u0) ERR_INVALID_PRICE)
+            (asserts! (> (- (get amount card) (get redeemed card)) u0) ERR_INSUFFICIENT_BALANCE)
+            (asserts! (<= stacks-block-height (get expiry-block card)) ERR_TOKEN_EXPIRED)
+            
+            (map-set marketplace-listings listing-id {
+                seller: tx-sender,
+                card-id: card-id,
+                price-stx: price-stx,
+                expires-block: expires-block,
+                active: true
+            })
+            
+            (var-set next-listing-id (+ listing-id u1))
+            (ok listing-id)
+        )
+    )
+)
+
+(define-public (buy-listed-card (listing-id uint))
+    (let (
+        (listing (unwrap! (map-get? marketplace-listings listing-id) ERR_LISTING_NOT_FOUND))
+        (card (unwrap! (map-get? gift-cards (get card-id listing)) ERR_CARD_NOT_FOUND))
+        (remaining-value (- (get amount card) (get redeemed card)))
+    )
+        (begin
+            (asserts! (get active listing) ERR_LISTING_NOT_FOUND)
+            (asserts! (<= stacks-block-height (get expires-block listing)) ERR_LISTING_EXPIRED)
+            (asserts! (<= stacks-block-height (get expiry-block card)) ERR_TOKEN_EXPIRED)
+            (asserts! (> remaining-value u0) ERR_INSUFFICIENT_BALANCE)
+            
+            (try! (stx-transfer? (get price-stx listing) tx-sender (get seller listing)))
+            (try! (ft-transfer? gift-card remaining-value (get seller listing) tx-sender))
+            
+            (map-set gift-cards (get card-id listing)
+                (merge card { recipient: tx-sender })
+            )
+            
+            (map-set marketplace-listings listing-id
+                (merge listing { active: false })
+            )
+            
+            (ok (get card-id listing))
+        )
+    )
+)
+
+(define-public (cancel-listing (listing-id uint))
+    (let ((listing (unwrap! (map-get? marketplace-listings listing-id) ERR_LISTING_NOT_FOUND)))
+        (begin
+            (asserts! (is-eq tx-sender (get seller listing)) ERR_NOT_LISTING_OWNER)
+            
+            (map-set marketplace-listings listing-id
+                (merge listing { active: false })
+            )
+            (ok true)
+        )
     )
 )
