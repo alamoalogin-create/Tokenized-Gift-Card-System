@@ -16,6 +16,9 @@
 (define-constant ERR_NOT_LISTING_OWNER (err u203))
 (define-constant ERR_INVALID_PRICE (err u204))
 
+(define-constant ERR_REFERRAL_EXISTS (err u300))
+(define-constant ERR_INVALID_REFERRAL (err u301))
+(define-constant ERR_NO_BONUS_AVAILABLE (err u302))
 
 (define-data-var token-name (string-ascii 32) "Gift Card Token")
 (define-data-var token-symbol (string-ascii 10) "GIFT")
@@ -308,6 +311,69 @@
                 (merge listing { active: false })
             )
             (ok true)
+        )
+    )
+)
+
+(define-map referrals principal {
+    referrer: principal,
+    referrals-count: uint,
+    bonus-earned: uint,
+    registered-block: uint
+})
+
+(define-data-var bonus-per-referral uint u10)
+
+(define-read-only (get-referral-stats (user principal))
+    (map-get? referrals user)
+)
+
+(define-read-only (get-bonus-rate)
+    (ok (var-get bonus-per-referral))
+)
+
+(define-public (register-with-referral (referrer principal))
+    (let ((existing (map-get? referrals tx-sender)))
+        (begin
+            (asserts! (is-none existing) ERR_REFERRAL_EXISTS)
+            (asserts! (not (is-eq tx-sender referrer)) ERR_INVALID_REFERRAL)
+            
+            (match (map-get? referrals referrer)
+                ref-data (map-set referrals referrer 
+                    (merge ref-data { referrals-count: (+ (get referrals-count ref-data) u1) }))
+                (map-set referrals referrer {
+                    referrer: referrer,
+                    referrals-count: u1,
+                    bonus-earned: u0,
+                    registered-block: stacks-block-height
+                })
+            )
+            
+            (map-set referrals tx-sender {
+                referrer: referrer,
+                referrals-count: u0,
+                bonus-earned: u0,
+                registered-block: stacks-block-height
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (claim-referral-bonus)
+    (let (
+        (user-data (unwrap! (map-get? referrals tx-sender) ERR_INVALID_REFERRAL))
+        (bonus-amount (* (get referrals-count user-data) (var-get bonus-per-referral)))
+        (unclaimed (- bonus-amount (get bonus-earned user-data)))
+    )
+        (begin
+            (asserts! (> unclaimed u0) ERR_NO_BONUS_AVAILABLE)
+            (try! (ft-mint? gift-card unclaimed tx-sender))
+            
+            (map-set referrals tx-sender
+                (merge user-data { bonus-earned: bonus-amount })
+            )
+            (ok unclaimed)
         )
     )
 )
