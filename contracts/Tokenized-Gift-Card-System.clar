@@ -20,6 +20,10 @@
 (define-constant ERR_INVALID_REFERRAL (err u301))
 (define-constant ERR_NO_BONUS_AVAILABLE (err u302))
 
+(define-constant ERR_BATCH_TOO_LARGE (err u400))
+(define-constant ERR_BATCH_EMPTY (err u401))
+(define-constant MAX_BATCH_SIZE u50)
+
 (define-data-var token-name (string-ascii 32) "Gift Card Token")
 (define-data-var token-symbol (string-ascii 10) "GIFT")
 (define-data-var token-uri (optional (string-utf8 256)) none)
@@ -374,6 +378,90 @@
                 (merge user-data { bonus-earned: bonus-amount })
             )
             (ok unclaimed)
+        )
+    )
+)
+
+
+(define-map batch-operations uint {
+    business: principal,
+    total-cards: uint,
+    successful: uint,
+    failed: uint,
+    created-block: uint
+})
+
+(define-data-var next-batch-id uint u1)
+
+(define-read-only (get-batch-info (batch-id uint))
+    (map-get? batch-operations batch-id)
+)
+
+(define-read-only (get-batch-stats (business principal))
+    (ok {
+        total-batches: (default-to u0 (some (- (var-get next-batch-id) u1))),
+        current-block: stacks-block-height
+    })
+)
+
+(define-public (batch-issue-cards 
+    (recipients (list 50 {recipient: principal, amount: uint}))
+    (expiry-blocks uint))
+    (let (
+        (batch-id (var-get next-batch-id))
+        (business-data (unwrap! (map-get? businesses tx-sender) ERR_BUSINESS_NOT_REGISTERED))
+        (batch-size (len recipients))
+    )
+        (begin
+            (asserts! (> batch-size u0) ERR_BATCH_EMPTY)
+            (asserts! (<= batch-size MAX_BATCH_SIZE) ERR_BATCH_TOO_LARGE)
+            (asserts! (get active business-data) ERR_BUSINESS_NOT_REGISTERED)
+            
+            (let ((results (fold process-single-card-issuance recipients 
+                {success: u0, fail: u0, expiry: expiry-blocks, business: tx-sender})))
+                
+                (map-set batch-operations batch-id {
+                    business: tx-sender,
+                    total-cards: batch-size,
+                    successful: (get success results),
+                    failed: (get fail results),
+                    created-block: stacks-block-height
+                })
+                
+                (map-set businesses tx-sender 
+                    (merge business-data { 
+                        total-issued: (+ (get total-issued business-data) (get success results)) 
+                    })
+                )
+                
+                (var-set next-batch-id (+ batch-id u1))
+                (ok {batch-id: batch-id, successful: (get success results), failed: (get fail results)})
+            )
+        )
+    )
+)
+
+(define-private (process-single-card-issuance 
+    (card-data {recipient: principal, amount: uint})
+    (state {success: uint, fail: uint, expiry: uint, business: principal}))
+    (let (
+        (card-id (var-get next-card-id))
+        (expiry-block (+ stacks-block-height (get expiry state)))
+    )
+        (match (ft-mint? gift-card (get amount card-data) (get recipient card-data))
+            minted (begin
+                (map-set gift-cards card-id {
+                    business: (get business state),
+                    recipient: (get recipient card-data),
+                    amount: (get amount card-data),
+                    expiry-block: expiry-block,
+                    redeemed: u0,
+                    created-block: stacks-block-height
+                })
+                (var-set next-card-id (+ card-id u1))
+                (merge state {success: (+ (get success state) u1)})
+            )
+            error (merge state {fail: (+ (get fail state) u1)})
         )
     )
 )
